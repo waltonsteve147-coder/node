@@ -73,6 +73,20 @@ namespace crypto {
 
 namespace {
 
+void InjectOpenSSLErrorForTesting(const FunctionCallbackInfo<Value>&) {
+#if NCRYPTO_USE_OPENSSL_PROVIDER
+  ERR_raise(ERR_LIB_USER, ERR_R_INTERNAL_ERROR);
+#elif NCRYPTO_USE_BORINGSSL
+  ERR_put_error(ERR_LIB_USER, 0, ERR_R_INTERNAL_ERROR, __FILE__, __LINE__);
+#else
+#error "Unsupported crypto backend"
+#endif
+}
+
+void HasOpenSSLErrorForTesting(const FunctionCallbackInfo<Value>& args) {
+  args.GetReturnValue().Set(ERR_peek_error() != 0);
+}
+
 // Our custom implementation of the certificate verify callback
 // used when establishing a TLS handshake. Because we cannot perform
 // I/O quickly enough with X509_STORE_CTX_ APIs in this callback,
@@ -81,7 +95,7 @@ namespace {
 // that the user user Connection::VerifyError after the `secure`
 // callback has been made.
 int VerifyCallback(int preverify_ok, X509_STORE_CTX* ctx) {
-  // From https://www.openssl.org/docs/man1.1.1/man3/SSL_verify_cb:
+  // From https://www.openssl.org/docs/man3.0/man3/SSL_verify_cb:
   //
   //   If VerifyCallback returns 1, the verification process is continued. If
   //   VerifyCallback always returns 1, the TLS/SSL handshake will not be
@@ -544,9 +558,9 @@ void TLSWrap::InitSSL() {
   SSL_set_mode(ssl_.get(), SSL_MODE_RELEASE_BUFFERS);
 #endif  // SSL_MODE_RELEASE_BUFFERS
 
-  // This is default in 1.1.1, but set it anyway, Cycle() doesn't currently
-  // re-call ClearIn() if SSL_read() returns SSL_ERROR_WANT_READ, so data can be
-  // left sitting in the incoming enc_in_ and never get processed.
+  // Set SSL_MODE_AUTO_RETRY explicitly because Cycle() doesn't currently
+  // re-call ClearIn() if SSL_read() returns SSL_ERROR_WANT_READ, so data can
+  // be left sitting in the incoming enc_in_ and never get processed.
   // - https://wiki.openssl.org/index.php/TLS1.3#Non-application_data_records
   SSL_set_mode(ssl_.get(), SSL_MODE_AUTO_RETRY);
 
@@ -678,8 +692,8 @@ void TLSWrap::SSLInfoCallback(const SSL* ssl_, int where, int ret) {
     }
   }
 
-  // SSL_CB_HANDSHAKE_START and SSL_CB_HANDSHAKE_DONE are called
-  // sending HelloRequest in OpenSSL-1.1.1.
+  // SSL_CB_HANDSHAKE_START and SSL_CB_HANDSHAKE_DONE are called when sending
+  // HelloRequest.
   // We need to check whether this is in a renegotiation state or not.
   if (where & SSL_CB_HANDSHAKE_DONE && !SSL_renegotiate_pending(ssl)) {
     Debug(c, "SSLInfoCallback(SSL_CB_HANDSHAKE_DONE);");
@@ -883,6 +897,7 @@ void TLSWrap::ClearOut() {
   for (;;) {
     {
       SSLLibraryCallScope ssl_library_call_scope(this);
+      if (ERR_set_mark() != 0) ERR_clear_error();
       read = SSL_read(ssl_.get(), out + length, kClearOutChunkSize - length);
     }
     Debug(this, "Read %d bytes of cleartext output", read);
@@ -951,10 +966,12 @@ void TLSWrap::ClearOut() {
             return;
 
           const char* ls = ERR_lib_error_string(ssl_err);
-#if NCRYPTO_USE_OPENSSL3_PROVIDER
+#if NCRYPTO_USE_OPENSSL_PROVIDER
           const char* fs = nullptr;
-#else
+#elif NCRYPTO_USE_BORINGSSL
           const char* fs = ERR_func_error_string(ssl_err);
+#else
+#error "Unsupported crypto backend"
 #endif
           const char* rs = ERR_reason_error_string(ssl_err);
           if (!Set(env(), obj, env()->library_string(), ls) ||
@@ -1014,6 +1031,7 @@ void TLSWrap::ClearIn() {
   int written;
   {
     SSLLibraryCallScope ssl_library_call_scope(this);
+    if (ERR_set_mark() != 0) ERR_clear_error();
     written = SSL_write(ssl_.get(), bs->Data(), bs->ByteLength());
   }
   Debug(this, "Writing %zu bytes, written = %d", bs->ByteLength(), written);
@@ -1212,6 +1230,7 @@ int TLSWrap::DoWrite(WriteWrap* w,
     NodeBIO::FromBIO(enc_out_)->set_allocate_tls_hint(length);
     {
       SSLLibraryCallScope ssl_library_call_scope(this);
+      if (ERR_set_mark() != 0) ERR_clear_error();
       written = SSL_write(ssl_.get(), bs->Data(), length);
     }
   } else {
@@ -1220,6 +1239,7 @@ int TLSWrap::DoWrite(WriteWrap* w,
     NodeBIO::FromBIO(enc_out_)->set_allocate_tls_hint(buf->len);
     {
       SSLLibraryCallScope ssl_library_call_scope(this);
+      if (ERR_set_mark() != 0) ERR_clear_error();
       written = SSL_write(ssl_.get(), buf->base, buf->len);
     }
 
@@ -2349,6 +2369,12 @@ void TLSWrap::Initialize(
   Isolate* isolate = env->isolate();
 
   SetMethod(context, target, "wrap", TLSWrap::Wrap);
+  SetMethod(context,
+            target,
+            "injectOpenSSLErrorForTesting",
+            InjectOpenSSLErrorForTesting);
+  SetMethodNoSideEffect(
+      context, target, "hasOpenSSLErrorForTesting", HasOpenSSLErrorForTesting);
 
   NODE_DEFINE_CONSTANT(target, HAVE_SSL_TRACE);
 
@@ -2443,6 +2469,8 @@ void TLSWrap::Initialize(
 void TLSWrap::RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(TLSWrap::Wrap);
   registry->Register(GetWriteQueueSize);
+  registry->Register(InjectOpenSSLErrorForTesting);
+  registry->Register(HasOpenSSLErrorForTesting);
 
   registry->Register(CertCbDone);
   registry->Register(ClientHelloDone);

@@ -204,7 +204,10 @@ class ZlibContext final : public MemoryRetainer {
   void SetFlush(int flush);
   void GetAfterWriteOffsets(uint32_t* avail_in, uint32_t* avail_out) const;
   CompressionError GetErrorInfo() const;
-  inline void SetMode(node_zlib_mode mode) { mode_ = mode; }
+  inline void SetMode(node_zlib_mode mode) {
+    mode_ = mode;
+    auto_detect_ = mode == UNZIP;
+  }
   CompressionError ResetStream();
 
   // Zlib-specific:
@@ -229,6 +232,7 @@ class ZlibContext final : public MemoryRetainer {
  private:
   CompressionError ErrorForMessage(const char* message) const;
   CompressionError SetDictionary();
+  CompressionError ResetZStream();
   bool InitZlib();
 
   Mutex mutex_;  // Protects zlib_init_done_.
@@ -238,6 +242,7 @@ class ZlibContext final : public MemoryRetainer {
   int level_ = 0;
   int mem_level_ = 0;
   node_zlib_mode mode_ = NONE;
+  bool auto_detect_ = false;
   int strategy_ = 0;
   int window_bits_ = 0;
   bool reject_garbage_after_end_ = false;
@@ -380,6 +385,7 @@ class ZstdCompressContext final : public ZstdContext {
 
   uint64_t pledged_src_size_ = ZSTD_CONTENTSIZE_UNKNOWN;
   std::optional<uint64_t> consumed_src_size_;
+  bool frame_ended_ = false;
 
   // A frame is complete once ZSTD_compressStream2() has been called with
   // ZSTD_e_end and has returned 0. Resetting an incomplete frame is only unsafe
@@ -1215,7 +1221,7 @@ void ZlibContext::DoThreadPoolWork() {
         // Trailing zero bytes are okay, though, since they are frequently
         // used for padding.
 
-        ResetStream();
+        ResetZStream();
         err_ = inflate(&strm_, flush_);
       }
       break;
@@ -1294,6 +1300,14 @@ CompressionError ZlibContext::ResetStream() {
         Z_STREAM_ERROR);
   }
 
+  if (auto_detect_) {
+    mode_ = UNZIP;
+    gzip_id_bytes_read_ = 0;
+  }
+  return ResetZStream();
+}
+
+CompressionError ZlibContext::ResetZStream() {
   bool first_init_call = InitZlib();
   if (first_init_call && err_ != Z_OK) {
     return ErrorForMessage("Failed to init stream before reset");
@@ -1310,6 +1324,7 @@ CompressionError ZlibContext::ResetStream() {
     case INFLATE:
     case INFLATERAW:
     case GUNZIP:
+    case UNZIP:
       err_ = inflateReset(&strm_);
       break;
     default:
@@ -1773,6 +1788,7 @@ CompressionError ZstdCompressContext::Init(uint64_t pledged_src_size,
                                            std::string_view dictionary,
                                            bool) {
   pledged_src_size_ = pledged_src_size;
+  frame_ended_ = false;
   frame_complete_ = true;
   frame_output_emitted_ = false;
   if (pledged_src_size == ZSTD_CONTENTSIZE_UNKNOWN) {
@@ -1845,6 +1861,7 @@ CompressionError ZstdCompressContext::ResetStream() {
   } else {
     consumed_src_size_ = 0;
   }
+  frame_ended_ = false;
   frame_complete_ = true;
   frame_output_emitted_ = false;
   error_ = ZSTD_error_no_error;
@@ -1854,6 +1871,10 @@ CompressionError ZstdCompressContext::ResetStream() {
 }
 
 void ZstdCompressContext::DoThreadPoolWork() {
+  // Ending an already ended frame would append an empty one.
+  if (frame_ended_ && input_.size == 0) {
+    return;
+  }
   // Zstd overrides a configured pledge when the first call uses ZSTD_e_end.
   size_t const input_pos = input_.pos;
   size_t const remaining =
@@ -1861,6 +1882,7 @@ void ZstdCompressContext::DoThreadPoolWork() {
   if (consumed_src_size_.has_value()) {
     *consumed_src_size_ += input_.pos - input_pos;
   }
+  frame_ended_ = remaining == 0 && flush_ == ZSTD_e_end;
   if (output_.pos > 0) {
     frame_output_emitted_ = true;
   }

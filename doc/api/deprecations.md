@@ -774,7 +774,7 @@ the API is not useful.
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/65074
     description: Runtime deprecation.
   - version:
@@ -2232,6 +2232,9 @@ or `module.exports` instead.
 
 <!-- YAML
 changes:
+  - version: v27.0.0-alpha.0.0.0
+    pr-url: https://github.com/nodejs/node/pull/64777
+    description: End-of-Life.
   - version: v23.0.0
     pr-url: https://github.com/nodejs/node/pull/55019
     description: Runtime deprecation.
@@ -2240,9 +2243,9 @@ changes:
     description: Documentation-only deprecation.
 -->
 
-Type: Runtime
+Type: End-of-Life
 
-The [`crypto.fips`][] property is deprecated. Please use `crypto.setFips()`
+The `crypto.fips` property is no longer supported. Use `crypto.setFips()`
 and `crypto.getFips()` instead.
 
 An automated migration is available ([source](https://github.com/nodejs/userland-migrations/tree/main/recipes/crypto-fips-to-getFips)).
@@ -2319,7 +2322,7 @@ npx codemod @nodejs/timers-deprecations
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/61095
     description: End-of-Life.
   - version: v10.0.0
@@ -4108,9 +4111,9 @@ that are shorter than the default authentication tag length (i.e., shorter than
 
 <!-- YAML
 changes:
-  - version: REPLACEME
-    pr-url: https://github.com/nodejs/node/pull/63966
-    description: Runtime deprecation.
+  - version: v27.0.0-alpha.0.0.0
+    pr-url: https://github.com/nodejs/node/pull/64777
+    description: End-of-Life.
   - version:
     - v22.4.0
     - v20.16.0
@@ -4118,19 +4121,21 @@ changes:
     description: Documentation-only deprecation.
 -->
 
-Type: Runtime
+Type: End-of-Life
 
-OpenSSL 3 has deprecated support for custom engines with a recommendation to
-switch to its new provider model. The `clientCertEngine` option for
-`https.request()`, [`tls.createSecureContext()`][], and [`tls.createServer()`][];
-the `privateKeyEngine` and `privateKeyIdentifier` for [`tls.createSecureContext()`][];
-and [`crypto.setEngine()`][] all depend on this functionality from OpenSSL.
+The `crypto.setEngine()` API and the `crypto.constants.ENGINE_METHOD_*`
+constants have been removed. The `clientCertEngine` option for
+[`https.request()`][], [`tls.createSecureContext()`][], and
+[`tls.createServer()`][] and the `privateKeyEngine` and `privateKeyIdentifier`
+options for [`tls.createSecureContext()`][] now throw
+`ERR_CRYPTO_CUSTOM_ENGINE_NOT_SUPPORTED` when used. There is no direct
+replacement API in Node.js. OpenSSL's provider model replaces engines upstream.
 
 ### DEP0184: Instantiating `node:zlib` classes without `new`
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/64849
     description: End-of-Life.
   - version: v24.0.0
@@ -4281,7 +4286,7 @@ npx codemod@latest @nodejs/repl-builtin-modules
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/60658
     description: End-of-Life.
   - version:
@@ -4349,7 +4354,7 @@ npx codemod@latest @nodejs/http2-priority-signaling
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/64853
     description: Runtime deprecation.
   - version:
@@ -4420,7 +4425,7 @@ npx codemod@latest @nodejs/types-is-native-error
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/64000
     description: End-of-Life.
   - version: v25.0.0
@@ -4443,7 +4448,7 @@ Creating SHAKE-128 and SHAKE-256 digests without an explicit
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/58535
     description: Runtime deprecation.
   - version:
@@ -4453,7 +4458,7 @@ changes:
     description: Documentation-only deprecation.
 -->
 
-Type: Documentation-only
+Type: Runtime
 
 The `node:_http_agent`, `node:_http_client`, `node:_http_common`, `node:_http_incoming`,
 `node:_http_outgoing` and `node:_http_server` modules are deprecated as they should be considered
@@ -4567,7 +4572,7 @@ const server = http2.createSecureServer({
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/63188
     description: End-of-Life.
   - version: v26.0.0
@@ -4588,7 +4593,7 @@ Passing a [`CryptoKey`][] to `node:crypto` functions is no longer supported.
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/63188
     description: End-of-Life.
   - version: v26.0.0
@@ -4637,7 +4642,7 @@ removed in a future version of Node.js.
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/63624
     description: Runtime deprecation.
   - version:
@@ -4658,7 +4663,7 @@ will throw an error in a future version.
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/63249
     description: Documentation-only deprecation.
 -->
@@ -4712,7 +4717,7 @@ successfully before the response closed.
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/64794
     description: Runtime deprecation.
   - version:
@@ -4884,11 +4889,9 @@ Type: Documentation-only
 [`crypto.createDecipheriv()`]: crypto.md#cryptocreatedecipherivalgorithm-key-iv-options
 [`crypto.createHash()`]: crypto.md#cryptocreatehashalgorithm-options
 [`crypto.createHmac()`]: crypto.md#cryptocreatehmacalgorithm-key-options
-[`crypto.fips`]: crypto.md#cryptofips
 [`crypto.pbkdf2()`]: crypto.md#cryptopbkdf2password-salt-iterations-keylen-digest-callback
 [`crypto.randomBytes()`]: crypto.md#cryptorandombytessize-callback
 [`crypto.scrypt()`]: crypto.md#cryptoscryptpassword-salt-keylen-options-callback
-[`crypto.setEngine()`]: crypto.md#cryptosetengineengine-flags
 [`decipher.final()`]: crypto.md#decipherfinaloutputencoding
 [`decipher.setAuthTag()`]: crypto.md#deciphersetauthtagbuffer-encoding
 [`dirent.parentPath`]: fs.md#direntparentpath

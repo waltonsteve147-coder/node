@@ -224,6 +224,15 @@ if defined pgo_generate if defined pgo_use (
   exit /b 1
 )
 
+:: PGO generation build release flag cleaning
+if defined build_release if defined pgo_generate (
+  set package=
+  set msi=
+  set licensertf=
+  set cctest=
+  set sign=
+)
+
 if defined msi     set stage_package=1
 if defined package set stage_package=1
 
@@ -231,7 +240,7 @@ if defined package set stage_package=1
 set "node_exe=%config%\node.exe"
 set "node_gyp_exe="%node_exe%" deps\npm\node_modules\node-gyp\bin\node-gyp"
 set "npm_exe="%~dp0%node_exe%" %~dp0deps\npm\bin\npm-cli.js"
-set "doc_kit_exe="%~dp0%node_exe%" %~dp0tools\doc\node_modules\@doc-kit\cli\bin\cli.mjs"
+set "doc_kit_exe="%~dp0%node_exe%" %~dp0tools\doc\node_modules\@node-core\doc-kit\bin\cli.mjs"
 if "%target_env%"=="vs2022" set "node_gyp_exe=%node_gyp_exe% --msvs_version=2022"
 if "%target_env%"=="vs2026" set "node_gyp_exe=%node_gyp_exe% --msvs_version=2026"
 
@@ -716,15 +725,13 @@ robocopy /e doc\api %config%\doc\api
 
 %doc_kit_exe% ^
   generate ^
-  --config-file "%~dp0tools\doc\web.doc-kit.config.mjs" ^
+  -t legacy-html-all legacy-json-all api-links ^
+  -i doc/api/*.md ^
+  -i lib/*.js ^
   -o %config%/doc/api/ ^
-  -v %NODE_VERSION%
-
-%doc_kit_exe% ^
-  generate ^
-  --config-file "%~dp0tools\doc\api-links.doc-kit.config.mjs" ^
-  -o %config%/doc/api/ ^
-  -v %NODE_VERSION%
+  -c file://%~dp0\CHANGELOG.md ^
+  -v %NODE_VERSION% ^
+  --type-map "file://%~dp0doc\type-map.json"
 
 :run
 @rem Run tests if requested.
@@ -968,16 +975,19 @@ rem ***************
 set NODE_VERSION=
 set TAG=
 set FULLVERSION=
+set NODE_FULL_VERSION=
 
 for /F "usebackq tokens=*" %%i in (`python "%~dp0tools\getnodeversion.py"`) do set NODE_VERSION=%%i
 if not defined NODE_VERSION (
   echo Cannot determine current version of Node.js
   exit /b 1
 )
+@rem NODE_VERSION stays numeric as it is used as the MSI ProductVersion.
+for /F "usebackq tokens=*" %%i in (`python "%~dp0tools\getnodeversion.py" --full`) do set NODE_FULL_VERSION=%%i
 
 if not defined DISTTYPE set DISTTYPE=release
 if "%DISTTYPE%"=="release" (
-  set FULLVERSION=%NODE_VERSION%
+  set FULLVERSION=%NODE_FULL_VERSION%
   goto distexit
 )
 if "%DISTTYPE%"=="custom" (

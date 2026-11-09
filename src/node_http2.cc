@@ -801,6 +801,18 @@ bool Http2Session::HasPendingData() const {
   return true;
 }
 
+// nghttp2 signals that the connection should be dropped by having both
+// want_read and want_write return 0. If that happens while we still track
+// open streams, nghttp2 has terminated the session on its own (for example
+// due to a protocol error from the peer) and those streams will never be
+// completed.
+bool Http2Session::HasStreamsAbandonedByNghttp2() const {
+  if (HasPendingData()) return false;
+  return std::ranges::any_of(streams_, [](const auto& entry) {
+    return !entry.second->is_closed() && !entry.second->is_destroyed();
+  });
+}
+
 void Http2Session::EmitStatistics() {
   if (!HasHttp2Observer(env())) [[likely]] {
     return;
@@ -2069,9 +2081,11 @@ uint8_t Http2Session::SendPendingData() {
 
   MaybeStopReading();
 
-  // If nghttp2 has internally torn down the session (detected in OnFrameSent)
-  // during the nghttp2_session_mem_send loop above, at this point we error:
-  if (internal_goaway_sent_) {
+  // If nghttp2 has internally torn down the session (detected in OnFrameSent,
+  // or because it no longer wants to read or write while we still have open
+  // streams) during the nghttp2_session_mem_send loop above, at this point we
+  // error:
+  if (internal_goaway_sent_ || HasStreamsAbandonedByNghttp2()) {
     internal_goaway_sent_ = false;
     if (!is_closing() && !is_destroyed()) {
       Isolate* isolate = env()->isolate();
@@ -2447,6 +2461,8 @@ void Http2Stream::CompleteDestroyCleanup() {
       // Free any remaining outgoing data chunks here. This should be done
       // here because it's possible for destroy to have been called while
       // we still have queued outbound writes.
+      if (session_)
+        DecrementAvailableOutboundLength(available_outbound_length_);
       while (!queue_.empty()) {
         NgHttp2StreamWrite& head = queue_.front();
         if (head.req_wrap)
@@ -2766,9 +2782,11 @@ bool Http2Stream::AddHeader(nghttp2_rcbuf* name,
 
   Http2Header header(env(), name, value, flags);
   size_t length = header.length() + 32;
-  // A header can only be added if we have not exceeded the maximum number
-  // of headers and the session has memory available for it.
-  if (!session_->has_available_session_memory(length) ||
+  // Queued request bodies must not block response headers on local streams.
+  // Push streams have even IDs and retain the full session memory check.
+  const bool exclude_outbound =
+      session_->type() == NGHTTP2_SESSION_CLIENT && (id_ & 1) != 0;
+  if (!session_->has_available_session_memory(length, exclude_outbound) ||
       current_headers_.size() == max_header_pairs_ ||
       current_headers_length_ + length > max_header_length_) {
     return false;
@@ -2879,12 +2897,13 @@ ssize_t Http2Stream::Provider::Stream::OnRead(nghttp2_session* handle,
 
 void Http2Stream::IncrementAvailableOutboundLength(size_t amount) {
   available_outbound_length_ += amount;
-  session_->IncrementCurrentSessionMemory(amount);
+  session_->IncrementQueuedOutboundMemory(amount);
 }
 
 void Http2Stream::DecrementAvailableOutboundLength(size_t amount) {
+  DCHECK_LE(amount, available_outbound_length_);
   available_outbound_length_ -= amount;
-  session_->DecrementCurrentSessionMemory(amount);
+  session_->DecrementQueuedOutboundMemory(amount);
 }
 
 

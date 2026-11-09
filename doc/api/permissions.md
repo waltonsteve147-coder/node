@@ -238,6 +238,13 @@ $ node -r /path/to/custom-require.js --permission index.js
   list.
 * `index.js` will be included in the allowed file system read list.
 
+The entrypoint is granted as passed on the command line, without the module
+loader's resolution. If it is a directory, such as in `node --permission .`,
+read access is granted to everything inside that directory, recursively. If it
+omits the file extension, such as in `node --permission index`, the resolved
+`index.js` is not granted. Pass the full path of the file, or use
+[`--allow-fs-read`][], to grant exactly what the application needs.
+
 The valid arguments for both flags are:
 
 * `*` - To allow all `FileSystemRead` or `FileSystemWrite` operations,
@@ -503,8 +510,6 @@ There are constraints you need to know before using this system:
   expanded path is not covered by `--allow-fs-write`. Because the location is
   chosen by the operator, gaps like this are treated as regular bugs rather
   than vulnerabilities. Please report them through the regular issue tracker.
-* OpenSSL engines cannot be requested at runtime when the Permission
-  Model is enabled, affecting the built-in crypto, https, and tls modules.
 * Run-Time Loadable Extensions cannot be loaded when the Permission Model is
   enabled, affecting the sqlite module.
 * Using existing file descriptors via the `node:fs` module bypasses the

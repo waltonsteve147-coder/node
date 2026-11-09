@@ -332,11 +332,12 @@ void JSValueToSQLiteResult(Isolate* isolate,
     sqlite3_result_double(ctx, value.As<Number>()->Value());
   } else if (value->IsString()) {
     Utf8Value val(isolate, value.As<String>());
-    sqlite3_result_text(ctx, *val, val.length(), SQLITE_TRANSIENT);
+    sqlite3_result_text64(
+        ctx, *val, val.length(), SQLITE_TRANSIENT, SQLITE_UTF8);
   } else if (value->IsArrayBufferView() || value->IsArrayBuffer() ||
              value->IsSharedArrayBuffer()) {
     ArrayBufferViewContents<uint8_t> buf(value);
-    sqlite3_result_blob(ctx, buf.data(), buf.length(), SQLITE_TRANSIENT);
+    sqlite3_result_blob64(ctx, buf.data(), buf.length(), SQLITE_TRANSIENT);
   } else if (value->IsBigInt()) {
     bool lossless;
     int64_t as_int = value.As<BigInt>()->Int64Value(&lossless);
@@ -645,7 +646,7 @@ class BackupJob : public ThreadPoolWork {
     Local<Promise::Resolver> resolver =
         Local<Promise::Resolver>::New(env()->isolate(), resolver_);
     if (backup_status_ != SQLITE_OK) {
-      HandleBackupError(resolver);
+      Settle(resolver, CreateSQLiteError(isolate, dest_.get()), {});
       return;
     }
 
@@ -654,7 +655,7 @@ class BackupJob : public ThreadPoolWork {
                                       source_->Connection(),
                                       source_db_.c_str()));
     if (!backup_) {
-      HandleBackupError(resolver);
+      Settle(resolver, CreateSQLiteError(isolate, dest_.get()), {});
       return;
     }
 
@@ -676,7 +677,12 @@ class BackupJob : public ThreadPoolWork {
 
     if (!(backup_status_ == SQLITE_OK || backup_status_ == SQLITE_DONE ||
           backup_status_ == SQLITE_BUSY || backup_status_ == SQLITE_LOCKED)) {
-      HandleBackupError(resolver, backup_status_);
+      Settle(resolver, CreateSQLiteError(isolate, backup_status_), {});
+      return;
+    }
+
+    if (backup_status_ == SQLITE_BUSY || backup_status_ == SQLITE_LOCKED) {
+      this->ScheduleWork();
       return;
     }
 
@@ -697,6 +703,7 @@ class BackupJob : public ThreadPoolWork {
                       env()->remaining_pages_string(),
                       Integer::New(env()->isolate(), remaining_pages))
                 .IsNothing()) {
+          Settle(resolver, {}, {});
           return;
         }
 
@@ -704,10 +711,7 @@ class BackupJob : public ThreadPoolWork {
         TryCatch try_catch(env()->isolate());
         USE(fn->Call(env()->context(), Null(env()->isolate()), 1, argv));
         if (try_catch.HasCaught()) {
-          Local<Value> exception = try_catch.Exception();
-          Finalize();
-          resolver->Reject(env()->context(), exception).ToChecked();
-          delete this;
+          Settle(resolver, try_catch.Exception(), {});
           return;
         }
       }
@@ -718,15 +722,11 @@ class BackupJob : public ThreadPoolWork {
     }
 
     if (backup_status_ != SQLITE_DONE) {
-      HandleBackupError(resolver);
+      Settle(resolver, CreateSQLiteError(isolate, dest_.get()), {});
       return;
     }
 
-    Finalize();
-    resolver
-        ->Resolve(env()->context(), Integer::New(env()->isolate(), total_pages))
-        .ToChecked();
-    delete this;
+    Settle(resolver, {}, Integer::New(isolate, total_pages));
   }
 
   void Finalize() {
@@ -738,9 +738,7 @@ class BackupJob : public ThreadPoolWork {
   }
 
   void Cleanup() {
-    if (backup_) {
-      sqlite3_backup_finish(backup_.release());
-    }
+    backup_.reset();
 
     if (dest_) {
       backup_status_ = sqlite3_errcode(dest_.get());
@@ -749,29 +747,19 @@ class BackupJob : public ThreadPoolWork {
   }
 
  private:
-  void HandleBackupError(Local<Promise::Resolver> resolver) {
-    Local<Object> e;
-    if (!CreateSQLiteError(env()->isolate(), dest_.get()).ToLocal(&e)) {
-      Finalize();
-      delete this;
-      return;
-    }
-
+  // The single exit point of a backup. Rejects with `error` if it is set,
+  // otherwise resolves with `value` if it is set. Neither being set means an
+  // exception is already pending. Deletes the job.
+  void Settle(Local<Promise::Resolver> resolver,
+              MaybeLocal<Value> error,
+              Local<Value> value) {
     Finalize();
-    resolver->Reject(env()->context(), e).ToChecked();
-    delete this;
-  }
-
-  void HandleBackupError(Local<Promise::Resolver> resolver, int errcode) {
-    Local<Object> e;
-    if (!CreateSQLiteError(env()->isolate(), errcode).ToLocal(&e)) {
-      Finalize();
-      delete this;
-      return;
+    Local<Value> e;
+    if (error.ToLocal(&e)) {
+      resolver->Reject(env()->context(), e).ToChecked();
+    } else if (!value.IsEmpty()) {
+      resolver->Resolve(env()->context(), value).ToChecked();
     }
-
-    Finalize();
-    resolver->Reject(env()->context(), e).ToChecked();
     delete this;
   }
 
@@ -781,14 +769,8 @@ class BackupJob : public ThreadPoolWork {
   BaseObjectPtr<Database> source_;
   Global<Promise::Resolver> resolver_;
   Global<Function> progressFunc_;
-  struct Sqlite3Deleter {
-    void operator()(sqlite3* db) const { sqlite3_close_v2(db); }
-  };
-  struct BackupDeleter {
-    void operator()(sqlite3_backup* b) const { sqlite3_backup_finish(b); }
-  };
-  std::unique_ptr<sqlite3, Sqlite3Deleter> dest_;
-  std::unique_ptr<sqlite3_backup, BackupDeleter> backup_;
+  ConnectionPtr dest_;
+  BackupPtr backup_;
   int pages_;
   int backup_status_ = SQLITE_OK;
   std::string source_db_;
@@ -1120,7 +1102,7 @@ bool VirtualTableModule::CanCallIntoJS() const {
 bool VirtualTableModule::CloseIterator(NodeVTabCursor* cursor) {
   VirtualTableModule* mod = cursor->module;
 
-  // Skipped in two cases:
+  // Skipped in three cases:
   //
   // - While the database is being torn down from a destructor, because those
   //   run from a garbage collection callback where JavaScript cannot be
@@ -1131,7 +1113,11 @@ bool VirtualTableModule::CloseIterator(NodeVTabCursor* cursor) {
   //   A generator whose own body threw has already run its `finally` as part of
   //   that throw, so this only affects an iterator abandoned while suspended
   //   because something else failed.
-  if (cursor->iterator.IsEmpty() || !mod->CanCallIntoJS() ||
+  // - When next() has already reported `done: true`, because the iteration ran
+  //   to completion. `return()` is only called on abrupt termination in
+  //   `for...of`; a finished iterator must not be asked to clean up again, and
+  //   a custom iterable may throw from `return()` even after completion.
+  if (cursor->iterator.IsEmpty() || cursor->done || !mod->CanCallIntoJS() ||
       mod->env_->isolate()->HasPendingException()) {
     return false;
   }
@@ -1445,7 +1431,10 @@ int VirtualTableModule::xNext(sqlite3_vtab_cursor* pCursor) {
            .ToLocal(&next_method_val)) {
     return mod->PropagateJSError();
   }
+  // On a protocol error, drop the iterator so it is not closed later.
+  // `for...of` does not call return() when next() is invalid either.
   if (!next_method_val->IsFunction()) {
+    cursor->iterator.Reset();
     return ReportProtocolError(
         pCursor->pVtab,
         "The \"options.rows\" iterator must have a next() method");
@@ -1458,6 +1447,7 @@ int VirtualTableModule::xNext(sqlite3_vtab_cursor* pCursor) {
     return mod->PropagateJSError();
   }
   if (!next_val->IsObject()) {
+    cursor->iterator.Reset();
     return ReportProtocolError(
         pCursor->pVtab,
         "The \"options.rows\" iterator's next() method must return an object");
@@ -1756,6 +1746,10 @@ void Database::FinalizeStatements() {
   statements_.clear();
 }
 
+void Database::TrackStatement(Statement* statement) {
+  statements_.insert(statement);
+}
+
 void Database::UntrackStatement(Statement* statement) {
   statements_.erase(statement);
 }
@@ -1822,10 +1816,10 @@ void Database::CreateTagStore(const FunctionCallbackInfo<Value>& args) {
 // undefined. Returns false if a JavaScript exception is pending, either from
 // the property getter or because the value is not a boolean.
 template <typename T>
-static bool ReadOptionalBool(Environment* env,
-                             Local<Object> options,
-                             const char* key,
-                             T* out) {
+[[nodiscard]] static bool ReadOptionalBool(Environment* env,
+                                           Local<Object> options,
+                                           const char* key,
+                                           T* out) {
   Local<String> key_string =
       OneByteString(env->isolate(), key, -1, NewStringType::kInternalized);
   Local<Value> value;
@@ -1841,6 +1835,31 @@ static bool ReadOptionalBool(Environment* env,
     return false;
   }
   *out = value->IsTrue();
+  return true;
+}
+
+// Reads options[key] into *out as a string, leaving *out unchanged if the value
+// is undefined. Returns false if a JavaScript exception is pending, either from
+// the property getter or because the value is not a string.
+[[nodiscard]] static bool ReadOptionalString(Environment* env,
+                                             Local<Object> options,
+                                             const char* key,
+                                             std::string* out) {
+  Local<String> key_string =
+      OneByteString(env->isolate(), key, -1, NewStringType::kInternalized);
+  Local<Value> value;
+  if (!options->Get(env->context(), key_string).ToLocal(&value)) {
+    return false;
+  }
+  if (value->IsUndefined()) {
+    return true;
+  }
+  if (!value->IsString()) {
+    THROW_ERR_INVALID_ARG_TYPE(
+        env->isolate(), "The \"options.%s\" argument must be a string.", key);
+    return false;
+  }
+  *out = Utf8Value(env->isolate(), value.As<String>()).ToString();
   return true;
 }
 
@@ -2084,6 +2103,8 @@ void Database::Close(const FunctionCallbackInfo<Value>& args) {
       env, db->IsInCallback(), "database cannot be closed while in a callback");
   db->FinalizeStatements();
   db->DeleteSessions();
+  // Close through the raw handle instead of reset() so that a failed close
+  // keeps the handle, which the error below is read from.
   int r = sqlite3_close_v2(db->connection_.get());
   CHECK_ERROR_OR_THROW(env->isolate(), db, r, SQLITE_OK, void());
   db->connection_.release();
@@ -2169,7 +2190,6 @@ void Database::Prepare(const FunctionCallbackInfo<Value>& args) {
   if (!stmt) {
     return;
   }
-  db->statements_.insert(stmt.get());
 
   if (return_arrays.has_value()) {
     stmt->return_arrays_ = return_arrays.value();
@@ -2414,22 +2434,7 @@ void Database::Deserialize(const FunctionCallbackInfo<Value>& args) {
     }
 
     Local<Object> options = args[1].As<Object>();
-    Local<String> db_name_key = FIXED_ONE_BYTE_STRING(env->isolate(), "dbName");
-    Local<Value> db_name_value;
-    if (!options->Get(env->context(), db_name_key).ToLocal(&db_name_value)) {
-      return;
-    }
-
-    if (!db_name_value->IsUndefined()) {
-      if (!db_name_value->IsString()) {
-        THROW_ERR_INVALID_ARG_TYPE(
-            env->isolate(),
-            "The \"options.dbName\" argument must be a string.");
-        return;
-      }
-      db_name =
-          Utf8Value(env->isolate(), db_name_value.As<String>()).ToString();
-    }
+    if (!ReadOptionalString(env, options, "dbName", &db_name)) return;
   }
 
   // Reading the options bag above can run user JavaScript through a property
@@ -2830,80 +2835,39 @@ void Database::CreateSession(const FunctionCallbackInfo<Value>& args) {
     }
 
     Local<Object> options = args[0].As<Object>();
-
-    Local<String> table_key = env->table_string();
-    bool hasIt;
-    if (!options->HasOwnProperty(env->context(), table_key).To(&hasIt)) {
-      return;
-    }
-    if (hasIt) {
-      Local<Value> table_value;
-      if (!options->Get(env->context(), table_key).ToLocal(&table_value)) {
-        return;
-      }
-
-      if (table_value->IsString()) {
-        table = Utf8Value(env->isolate(), table_value).ToString();
-      } else {
-        THROW_ERR_INVALID_ARG_TYPE(
-            env->isolate(), "The \"options.table\" argument must be a string.");
-        return;
-      }
-    }
-
-    Local<String> db_key = FIXED_ONE_BYTE_STRING(env->isolate(), "db");
-
-    if (!options->HasOwnProperty(env->context(), db_key).To(&hasIt)) {
-      return;
-    }
-    if (hasIt) {
-      Local<Value> db_value;
-      if (!options->Get(env->context(), db_key).ToLocal(&db_value)) {
-        // An error will have been scheduled.
-        return;
-      }
-      if (db_value->IsString()) {
-        db_name = Utf8Value(env->isolate(), db_value).ToString();
-      } else {
-        THROW_ERR_INVALID_ARG_TYPE(
-            env->isolate(), "The \"options.db\" argument must be a string.");
-        return;
-      }
-    }
+    if (!ReadOptionalString(env, options, "table", &table)) return;
+    if (!ReadOptionalString(env, options, "db", &db_name)) return;
   }
 
   // Reading the options bag above can run user JavaScript through a property
   // getter, which may have closed the database since it was checked.
   THROW_AND_RETURN_ON_BAD_STATE(env, !db->IsOpen(), "database is not open");
 
-  sqlite3_session* pSession;
-  int r =
-      sqlite3session_create(db->connection_.get(), db_name.c_str(), &pSession);
+  sqlite3_session* raw_session;
+  int r = sqlite3session_create(
+      db->connection_.get(), db_name.c_str(), &raw_session);
   CHECK_ERROR_OR_THROW(env->isolate(), db, r, SQLITE_OK, void());
-  bool wrapper_owns_session = false;
-  auto delete_session_on_failure = OnScopeLeave([&]() {
-    if (!wrapper_owns_session) {
-      sqlite3session_delete(pSession);
-    }
-  });
+  SessionPtr pSession(raw_session);
 
-  r = sqlite3session_attach(pSession, table == "" ? nullptr : table.c_str());
+  r = sqlite3session_attach(pSession.get(),
+                            table == "" ? nullptr : table.c_str());
   CHECK_ERROR_OR_THROW(env->isolate(), db, r, SQLITE_OK, void());
 
   BaseObjectPtr<Session> session =
-      Session::Create(env, BaseObjectPtr<Database>(db), pSession);
+      Session::Create(env, BaseObjectPtr<Database>(db), std::move(pSession));
   if (!session) {
     return;
   }
-  wrapper_owns_session = true;
   args.GetReturnValue().Set(session->object());
 }
 
 void Backup(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  if (args.Length() < 1 || !args[0]->IsObject()) {
-    THROW_ERR_INVALID_ARG_TYPE(env->isolate(),
-                               "The \"sourceDb\" argument must be an object.");
+  if (!args[0]->IsObject() ||
+      !env->sqlite_database_constructor_template()->HasInstance(args[0])) {
+    THROW_ERR_INVALID_ARG_TYPE(
+        env->isolate(),
+        "The \"sourceDb\" argument must be an instance of Database.");
     return;
   }
 
@@ -2950,39 +2914,8 @@ void Backup(const FunctionCallbackInfo<Value>& args) {
       }
     }
 
-    Local<Value> source_v;
-    if (!options->Get(env->context(), env->source_string())
-             .ToLocal(&source_v)) {
-      return;
-    }
-
-    if (!source_v->IsUndefined()) {
-      if (!source_v->IsString()) {
-        THROW_ERR_INVALID_ARG_TYPE(
-            env->isolate(),
-            "The \"options.source\" argument must be a string.");
-        return;
-      }
-
-      source_db = Utf8Value(env->isolate(), source_v.As<String>()).ToString();
-    }
-
-    Local<Value> target_v;
-    if (!options->Get(env->context(), env->target_string())
-             .ToLocal(&target_v)) {
-      return;
-    }
-
-    if (!target_v->IsUndefined()) {
-      if (!target_v->IsString()) {
-        THROW_ERR_INVALID_ARG_TYPE(
-            env->isolate(),
-            "The \"options.target\" argument must be a string.");
-        return;
-      }
-
-      dest_db = Utf8Value(env->isolate(), target_v.As<String>()).ToString();
-    }
+    if (!ReadOptionalString(env, options, "source", &source_db)) return;
+    if (!ReadOptionalString(env, options, "target", &dest_db)) return;
 
     Local<Value> progress_v;
     if (!options->Get(env->context(), env->progress_string())
@@ -3416,8 +3349,11 @@ int Database::TraceCallback(unsigned int type,
   Environment* env = db->env();
 
   diagnostics_channel::Channel* ch = db->trace_channel_.get();
-  if (ch == nullptr || !ch->HasSubscribers() ||
-      db->AreTraceEventsSuppressed()) {
+  // Checked before the channel, so that a suppressed callback does not
+  // dereference it at all. Statement finalization suppresses trace events, and
+  // that is the path SQLite takes during environment teardown.
+  if (db->AreTraceEventsSuppressed() || ch == nullptr ||
+      !ch->HasSubscribers()) {
     return 0;
   }
 
@@ -3473,6 +3409,7 @@ Statement::Statement(Environment* env,
                      BaseObjectPtr<Database> db,
                      StatementPtr stmt)
     : BaseObject(env, object), db_(std::move(db)), statement_(std::move(stmt)) {
+  db_->TrackStatement(this);
   MakeWeak();
   use_big_ints_ = db_->use_big_ints();
   return_arrays_ = db_->return_arrays();
@@ -3545,8 +3482,10 @@ inline int Statement::ResetStatement() {
 }
 
 bool Statement::BindParams(const FunctionCallbackInfo<Value>& args) {
-  int r = sqlite3_clear_bindings(statement_.get());
-  CHECK_ERROR_OR_THROW(env()->isolate(), db_.get(), r, SQLITE_OK, false);
+  int param_count = sqlite3_bind_parameter_count(statement_.get());
+  // Parameter indexing starts at one.
+  MaybeStackBuffer<bool, 32> bound(param_count + 1);
+  std::fill_n(bound.out(), param_count + 1, false);
 
   int anon_idx = 1;
   int anon_start = 0;
@@ -3562,8 +3501,6 @@ bool Statement::BindParams(const FunctionCallbackInfo<Value>& args) {
 
     if (allow_bare_named_params_ && !bare_named_params_.has_value()) {
       bare_named_params_.emplace();
-      int param_count = sqlite3_bind_parameter_count(statement_.get());
-      // Parameter indexing starts at one.
       for (int i = 1; i <= param_count; ++i) {
         const char* name = sqlite3_bind_parameter_name(statement_.get(), i);
         if (name == nullptr) {
@@ -3626,6 +3563,7 @@ bool Statement::BindParams(const FunctionCallbackInfo<Value>& args) {
       if (!BindValue(value, r)) {
         return false;
       }
+      bound[r] = true;
     }
     anon_start++;
   }
@@ -3641,8 +3579,18 @@ bool Statement::BindParams(const FunctionCallbackInfo<Value>& args) {
     if (!BindValue(args[i], anon_idx)) {
       return false;
     }
+    bound[anon_idx] = true;
 
     anon_idx++;
+  }
+
+  // sqlite3_clear_bindings() would expire statements whose query plan depends
+  // on a bound value, so only reset the parameters that were not bound.
+  for (int i = 1; i <= param_count; ++i) {
+    if (!bound[i]) {
+      int r = sqlite3_bind_null(statement_.get(), i);
+      CHECK_ERROR_OR_THROW(env()->isolate(), db_.get(), r, SQLITE_OK, false);
+    }
   }
 
   return true;
@@ -4347,24 +4295,27 @@ static inline void SetSideEffectFreeGetter(
 SQLTagStore::~SQLTagStore() {}
 
 Local<FunctionTemplate> SQLTagStore::GetConstructorTemplate(Environment* env) {
-  Isolate* isolate = env->isolate();
-  Local<FunctionTemplate> tmpl =
-      NewFunctionTemplate(isolate, IllegalConstructor);
-  tmpl->SetClassName(FIXED_ONE_BYTE_STRING(isolate, "SQLTagStore"));
-  tmpl->InstanceTemplate()->SetInternalFieldCount(
-      SQLTagStore::kInternalFieldCount);
-  SetProtoMethod(isolate, tmpl, "get", Get);
-  SetProtoMethod(isolate, tmpl, "all", All);
-  SetProtoMethod(isolate, tmpl, "iterate", Iterate);
-  SetProtoMethod(isolate, tmpl, "run", Run);
-  SetProtoMethod(isolate, tmpl, "clear", Clear);
-  SetSideEffectFreeGetter(isolate,
-                          tmpl,
-                          FIXED_ONE_BYTE_STRING(isolate, "capacity"),
-                          CapacityGetter);
-  SetSideEffectFreeGetter(
-      isolate, tmpl, FIXED_ONE_BYTE_STRING(isolate, "db"), DatabaseGetter);
-  SetSideEffectFreeGetter(isolate, tmpl, env->size_string(), SizeGetter);
+  Local<FunctionTemplate> tmpl = env->sqlite_tag_store_constructor_template();
+  if (tmpl.IsEmpty()) {
+    Isolate* isolate = env->isolate();
+    tmpl = NewFunctionTemplate(isolate, IllegalConstructor);
+    tmpl->SetClassName(FIXED_ONE_BYTE_STRING(isolate, "SQLTagStore"));
+    tmpl->InstanceTemplate()->SetInternalFieldCount(
+        SQLTagStore::kInternalFieldCount);
+    SetProtoMethod(isolate, tmpl, "get", Get);
+    SetProtoMethod(isolate, tmpl, "all", All);
+    SetProtoMethod(isolate, tmpl, "iterate", Iterate);
+    SetProtoMethod(isolate, tmpl, "run", Run);
+    SetProtoMethod(isolate, tmpl, "clear", Clear);
+    SetSideEffectFreeGetter(isolate,
+                            tmpl,
+                            FIXED_ONE_BYTE_STRING(isolate, "capacity"),
+                            CapacityGetter);
+    SetSideEffectFreeGetter(
+        isolate, tmpl, FIXED_ONE_BYTE_STRING(isolate, "db"), DatabaseGetter);
+    SetSideEffectFreeGetter(isolate, tmpl, env->size_string(), SizeGetter);
+    env->set_sqlite_tag_store_constructor_template(tmpl);
+  }
   return tmpl;
 }
 
@@ -4404,9 +4355,6 @@ bool SQLTagStore::ResetAndBindStatement(
     const FunctionCallbackInfo<Value>& args) {
   Isolate* isolate = env->isolate();
   int r = stmt->ResetStatement();
-  CHECK_ERROR_OR_THROW(isolate, stmt->db_.get(), r, SQLITE_OK, false);
-
-  r = sqlite3_clear_bindings(stmt->statement_.get());
   CHECK_ERROR_OR_THROW(isolate, stmt->db_.get(), r, SQLITE_OK, false);
 
   uint32_t n_params = args.Length() - 1;
@@ -4634,7 +4582,6 @@ BaseObjectPtr<Statement> SQLTagStore::PrepareStatement(
       return BaseObjectPtr<Statement>();
     }
 
-    session->database_->statements_.insert(stmt_obj.get());
     session->sql_tags_.Put(sql, stmt_obj);
     stmt = stmt_obj;
   }
@@ -4869,9 +4816,9 @@ void StatementIterator::Return(const FunctionCallbackInfo<Value>& args) {
 Session::Session(Environment* env,
                  Local<Object> object,
                  BaseObjectPtr<Database> database,
-                 sqlite3_session* session)
+                 SessionPtr session)
     : BaseObject(env, object),
-      session_(std::unique_ptr<sqlite3_session, SessionDeleter>(session)),
+      session_(std::move(session)),
       database_(std::move(database)) {
   database_->sessions_.insert(this);
   MakeWeak();
@@ -4883,7 +4830,7 @@ Session::~Session() {
 
 BaseObjectPtr<Session> Session::Create(Environment* env,
                                        BaseObjectPtr<Database> database,
-                                       sqlite3_session* session) {
+                                       SessionPtr session) {
   Local<Object> obj;
   if (!GetConstructorTemplate(env)
            ->InstanceTemplate()
@@ -4892,7 +4839,8 @@ BaseObjectPtr<Session> Session::Create(Environment* env,
     return nullptr;
   }
 
-  return MakeBaseObject<Session>(env, obj, std::move(database), session);
+  return MakeBaseObject<Session>(
+      env, obj, std::move(database), std::move(session));
 }
 
 Local<FunctionTemplate> Session::GetConstructorTemplate(Environment* env) {
@@ -4941,7 +4889,7 @@ void Session::Changeset(const FunctionCallbackInfo<Value>& args) {
   CHECK_ERROR_OR_THROW(
       env->isolate(), session->database_.get(), r, SQLITE_OK, void());
 
-  auto freeChangeset = OnScopeLeave([&] { sqlite3_free(pChangeset); });
+  DeleteFnPtr<void, sqlite3_free> changeset(pChangeset);
 
   Local<ArrayBuffer> buffer = ArrayBuffer::New(env->isolate(), nChangeset);
   if (nChangeset > 0) {
@@ -5074,51 +5022,60 @@ static void Initialize(Local<Object> target,
       }
     });
   }
-  Local<FunctionTemplate> db_tmpl = NewFunctionTemplate(isolate, Database::New);
-  db_tmpl->InstanceTemplate()->SetInternalFieldCount(
-      Database::kInternalFieldCount);
   Local<Object> constants = Object::New(isolate);
 
   DefineConstants(constants);
 
-  SetProtoMethod(isolate, db_tmpl, "open", Database::Open);
-  SetProtoMethod(isolate, db_tmpl, "close", Database::Close);
-  SetProtoDispose(isolate, db_tmpl, Database::Dispose);
-  SetProtoMethod(isolate, db_tmpl, "prepare", Database::Prepare);
-  SetProtoMethod(isolate, db_tmpl, "exec", Database::Exec);
-  SetProtoMethod(isolate, db_tmpl, "function", Database::CustomFunction);
-  SetProtoMethod(isolate, db_tmpl, "createTagStore", Database::CreateTagStore);
-  SetProtoMethodNoSideEffect(isolate, db_tmpl, "location", Database::Location);
-  SetProtoMethod(isolate, db_tmpl, "aggregate", Database::AggregateFunction);
-  SetProtoMethod(isolate, db_tmpl, "createSession", Database::CreateSession);
-  SetProtoMethod(isolate, db_tmpl, "applyChangeset", Database::ApplyChangeset);
-  SetProtoMethod(
-      isolate, db_tmpl, "enableLoadExtension", Database::EnableLoadExtension);
-  SetProtoMethod(
-      isolate, db_tmpl, "enableDefensive", Database::EnableDefensive);
-  SetProtoMethod(isolate, db_tmpl, "loadExtension", Database::LoadExtension);
-  SetProtoMethod(isolate, db_tmpl, "serialize", Database::Serialize);
-  SetProtoMethod(isolate, db_tmpl, "deserialize", Database::Deserialize);
-  SetProtoMethod(isolate, db_tmpl, "setAuthorizer", Database::SetAuthorizer);
-  SetProtoMethod(isolate, db_tmpl, "createModule", Database::CreateModule);
-  SetSideEffectFreeGetter(isolate,
-                          db_tmpl,
-                          FIXED_ONE_BYTE_STRING(isolate, "isOpen"),
-                          Database::IsOpenGetter);
-  SetSideEffectFreeGetter(isolate,
-                          db_tmpl,
-                          FIXED_ONE_BYTE_STRING(isolate, "isTransaction"),
-                          Database::IsTransactionGetter);
-  SetSideEffectFreeGetter(
-      isolate, db_tmpl, env->limits_string(), Database::LimitsGetter);
-  Local<String> sqlite_type_key = FIXED_ONE_BYTE_STRING(isolate, "sqlite-type");
-  Local<v8::Symbol> sqlite_type_symbol =
-      v8::Symbol::For(isolate, sqlite_type_key);
-  Local<String> database_sync_string =
-      FIXED_ONE_BYTE_STRING(isolate, "node:sqlite");
-  db_tmpl->InstanceTemplate()->Set(sqlite_type_symbol, database_sync_string);
-
-  SetConstructorFunction(context, target, "Database", db_tmpl);
+  Local<FunctionTemplate> db_tmpl = env->sqlite_database_constructor_template();
+  if (db_tmpl.IsEmpty()) {
+    db_tmpl = NewFunctionTemplate(isolate, Database::New);
+    db_tmpl->SetClassName(FIXED_ONE_BYTE_STRING(isolate, "Database"));
+    db_tmpl->InstanceTemplate()->SetInternalFieldCount(
+        Database::kInternalFieldCount);
+    SetProtoMethod(isolate, db_tmpl, "open", Database::Open);
+    SetProtoMethod(isolate, db_tmpl, "close", Database::Close);
+    SetProtoDispose(isolate, db_tmpl, Database::Dispose);
+    SetProtoMethod(isolate, db_tmpl, "prepare", Database::Prepare);
+    SetProtoMethod(isolate, db_tmpl, "exec", Database::Exec);
+    SetProtoMethod(isolate, db_tmpl, "function", Database::CustomFunction);
+    SetProtoMethod(
+        isolate, db_tmpl, "createTagStore", Database::CreateTagStore);
+    SetProtoMethodNoSideEffect(
+        isolate, db_tmpl, "location", Database::Location);
+    SetProtoMethod(isolate, db_tmpl, "aggregate", Database::AggregateFunction);
+    SetProtoMethod(isolate, db_tmpl, "createSession", Database::CreateSession);
+    SetProtoMethod(
+        isolate, db_tmpl, "applyChangeset", Database::ApplyChangeset);
+    SetProtoMethod(
+        isolate, db_tmpl, "enableLoadExtension", Database::EnableLoadExtension);
+    SetProtoMethod(
+        isolate, db_tmpl, "enableDefensive", Database::EnableDefensive);
+    SetProtoMethod(isolate, db_tmpl, "loadExtension", Database::LoadExtension);
+    SetProtoMethod(isolate, db_tmpl, "serialize", Database::Serialize);
+    SetProtoMethod(isolate, db_tmpl, "deserialize", Database::Deserialize);
+    SetProtoMethod(isolate, db_tmpl, "setAuthorizer", Database::SetAuthorizer);
+    SetProtoMethod(isolate, db_tmpl, "createModule", Database::CreateModule);
+    SetSideEffectFreeGetter(isolate,
+                            db_tmpl,
+                            FIXED_ONE_BYTE_STRING(isolate, "isOpen"),
+                            Database::IsOpenGetter);
+    SetSideEffectFreeGetter(isolate,
+                            db_tmpl,
+                            FIXED_ONE_BYTE_STRING(isolate, "isTransaction"),
+                            Database::IsTransactionGetter);
+    SetSideEffectFreeGetter(
+        isolate, db_tmpl, env->limits_string(), Database::LimitsGetter);
+    Local<String> sqlite_type_key =
+        FIXED_ONE_BYTE_STRING(isolate, "sqlite-type");
+    Local<v8::Symbol> sqlite_type_symbol =
+        v8::Symbol::For(isolate, sqlite_type_key);
+    Local<String> database_sync_string =
+        FIXED_ONE_BYTE_STRING(isolate, "node:sqlite");
+    db_tmpl->InstanceTemplate()->Set(sqlite_type_symbol, database_sync_string);
+    env->set_sqlite_database_constructor_template(db_tmpl);
+  }
+  SetConstructorFunction(
+      context, target, "Database", db_tmpl, SetConstructorFunctionFlag::NONE);
   SetConstructorFunction(context,
                          target,
                          "Statement",

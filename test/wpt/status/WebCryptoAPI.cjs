@@ -30,7 +30,7 @@ function skipSubtests(...entries) {
   }
 }
 
-if (!hasOpenSSL(3, 0)) {
+if (isBoringSSL) {
   skip(
     'modern-algos/encrypt_decrypt/aes_ocb.https.any.js',
     'modern-algos/generateKey/failures_AES-OCB.https.any.js',
@@ -81,7 +81,6 @@ if (isBoringSSL) {
     'secure-curves/derive_bits_keys/cfrg_curves_bits_curve448.https.any.js',
     'secure-curves/derive_bits_keys/cfrg_curves_keys_curve448.https.any.js',
     'modern-algos/digest/cshake.https.any.js',
-    'modern-algos/digest/sha3.https.any.js',
     'secure-curves/generateKey/failures_Ed448.https.any.js',
     'modern-algos/generateKey/failures_Hybrid-KEM.https.any.js',
     'secure-curves/generateKey/failures_X448.https.any.js',

@@ -1,10 +1,10 @@
 arg:
 let
   repo = "https://github.com/NixOS/nixpkgs";
-  rev = "f20cd90e28fe0403873f473b29e42662cd86e8c4";
+  rev = "0bb2eedc20e4739f29e8045034f2828ad7054f8f";
   nixpkgs = import (builtins.fetchTarball {
     url = "${repo}/archive/${rev}.tar.gz";
-    sha256 = "1vv6crfchmhjk5j61zgajggc3cgkalak2rvng07g41cvlcf6ldhj";
+    sha256 = "008j4dj5yrzww91qvp1lp2c9d1lkwc6i2dpainf5nkdkr3rwj8vy";
   }) arg;
 in
 # Unstable channel no longer supports Intel architecture for macOS. We can use the 26.05 channel
@@ -15,19 +15,20 @@ if builtins.currentSystem == "x86_64-darwin" then
 else
   nixpkgs
   // {
-    # OpenSSL 1.1.x and 3.0.x were removed from unstable, we want to keep testing with it
+    # OpenSSL 3.0.x was removed from unstable, but we want to keep testing it.
     inherit (import ./pkgs-26.05.nix arg)
-      openssl_1_1
       openssl_3
       ;
 
-    # TODO: remove this when the pin we use has picked up https://boringssl-review.googlesource.com/c/boringssl/+/104208
     boringssl =
       let
         inherit (nixpkgs) boringssl lib writeTextFile;
       in
+      # BoringSSL does not install the openssl.pc metadata required by configure.
+      # https://boringssl-review.googlesource.com/c/boringssl/+/104208
       writeTextFile {
         inherit (boringssl) name;
+        passthru = { inherit (boringssl) version; };
         destination = "/lib/pkgconfig/openssl.pc";
         text = ''
           Name: BoringSSL
@@ -43,4 +44,17 @@ else
       url = "${repo}/raw/aff8a0b28396750446e5537a96461bc4facdb287/pkgs/by-name/sc/sccache/package.nix";
       sha256 = "09dlc99sam9ld9jvzgcc00r4v4ls1cmbb0yim3mr895fpbs8b3qa";
     }) { };
+
+    # TODO: remove this override once the pin we use has picked up https://github.com/NixOS/nixpkgs/pull/575002
+    uvwasi = nixpkgs.uvwasi.overrideAttrs (old: {
+      patches = old.patches ++ [
+        (nixpkgs.fetchpatch2 {
+          url = "https://github.com/nodejs/uvwasi/commit/fe602a6911207efd8dcfc070a752bcf76813c978.patch?full_index=1";
+          hash = "sha256-MyFvRuEhcqZR+Bz2pY9vani8U1iyQrDeni2kKKnJGEI=";
+        })
+      ];
+
+      buildInputs = [ ];
+      propagatedBuildInputs = old.buildInputs;
+    });
   }

@@ -194,7 +194,7 @@ directly through the process arguments.
 ### `--allow-env`
 
 <!-- YAML
-added: REPLACEME
+added: v27.0.0-alpha.0.0.0
 -->
 
 > Stability: 1.1 - Active development
@@ -297,8 +297,10 @@ The valid arguments for the `--allow-fs-read` flag are:
 
 Examples can be found in the [File System Permissions][] documentation.
 
-The initializer module and custom `--require` modules has a implicit
-read permission.
+The initializer module and custom `--require` modules have an implicit
+read permission. The entrypoint is granted as passed on the command line,
+without the module loader's resolution; see the [File System Permissions][]
+documentation for details.
 
 ```console
 $ node --permission -r custom-require.js -r custom-require-2.js index.js
@@ -718,6 +720,10 @@ runtime, using either [`v8.startupSnapshot.setDeserializeMainFunction()`][] or
 an additional module during the snapshot building process is needed,
 please file a request in the [Node.js issue tracker][] and link to it in the
 [tracking issue for user-land snapshots][].
+
+During snapshot building, a debugger cannot be attached to the process.
+`--build-snapshot` cannot be used together with `--inspect`, `--inspect-brk` or
+`--inspect-wait`.
 
 ### `--build-snapshot-config`
 
@@ -1226,9 +1232,8 @@ priority than `--dns-result-order`.
 added: v6.0.0
 -->
 
-Enable [FIPS mode][] at startup. With OpenSSL 3, a configured provider named
-`fips` must be available and initialize successfully. With OpenSSL 1.1.1,
-Node.js must be built against a FIPS-capable OpenSSL.
+Enable [FIPS mode][] at startup. A configured provider named `fips` must be
+available and initialize successfully.
 
 ### `--enable-fips-indicator-events`
 
@@ -1650,7 +1655,7 @@ Enable the experimental [`node:stream/iter`][] module.
 ### `--experimental-strip-private-modules`
 
 <!-- YAML
-added: REPLACEME
+added: v27.0.0-alpha.0.0.0
 -->
 
 > Stability: 1 - Experimental
@@ -2380,7 +2385,7 @@ Disable the experimental [`node:sqlite`][] module.
 <!-- YAML
 added: v26.4.0
 changes:
-  - version: REPLACEME
+  - version: v27.0.0-alpha.0.0.0
     pr-url: https://github.com/nodejs/node/pull/66318
     description: VFS is unflagged but still experimental.
 -->
@@ -2532,8 +2537,7 @@ added: v6.9.0
 -->
 
 Load an OpenSSL configuration file on startup. The file can activate an
-OpenSSL 3 FIPS provider or configure a FIPS-capable OpenSSL 1.1.1 build. See
-[FIPS mode][].
+OpenSSL FIPS provider. See [FIPS mode][].
 
 This option takes precedence over the `OPENSSL_CONF` environment variable.
 
@@ -2545,7 +2549,7 @@ added:
   - v16.17.0
 -->
 
-Enable OpenSSL 3.0 legacy provider. For more information please see
+Enable OpenSSL's legacy provider. For more information please see
 [OSSL\_PROVIDER-legacy][OSSL_PROVIDER-legacy].
 
 ### `--openssl-shared-config`
@@ -3264,7 +3268,7 @@ the threshold specified, the process will exit with code `1`.
 ### `--test-forbid-only`
 
 <!-- YAML
-added: REPLACEME
+added: v27.0.0-alpha.0.0.0
 -->
 
 Fails the test run if a test or suite is declared with `only: true`, including
@@ -4082,10 +4086,6 @@ and is incompatible with `--run`, as `--run` takes precedence and ignores watch 
 ```bash
 node --watch-path=./src --watch-path=./tests index.js
 ```
-
-This option is only supported on macOS and Windows.
-An `ERR_FEATURE_UNAVAILABLE_ON_PLATFORM` exception will be thrown
-when the option is used on a platform that does not support it.
 
 ### `--watch-preserve-output`
 

@@ -665,9 +665,12 @@ declare namespace InternalCryptoBinding {
     setPrivateKey(key: ByteSource): void;
   }
 
-  interface SignHandle {
+  interface SignBaseHandle {
     init(algorithm: string): void;
     update(data: ByteSource, encoding?: string): void;
+  }
+
+  interface SignHandle extends SignBaseHandle {
     sign(
       ...args: [
         ...key: PreparedAsymmetricKeyArgs,
@@ -678,9 +681,7 @@ declare namespace InternalCryptoBinding {
     ): Buffer;
   }
 
-  interface VerifyHandle {
-    init(algorithm: string): void;
-    update(data: ByteSource, encoding?: string): void;
+  interface VerifyHandle extends SignBaseHandle {
     verify(
       ...args: [
         ...key: PreparedAsymmetricKeyArgs,
@@ -697,7 +698,6 @@ declare namespace InternalCryptoBinding {
     init(secureProtocol: string | undefined, minVersion: number, maxVersion: number): void;
     setKey(key: ByteSource, passphrase?: ByteSource): void;
     setSigalgs(sigalgs: string): void;
-    setEngineKey?(privateKeyIdentifier: string, privateKeyEngine: string): void;
     setCert(cert: ByteSource): void;
     setAllowPartialTrustChain(): void;
     addCACert(cert: ByteSource): void;
@@ -717,12 +717,37 @@ declare namespace InternalCryptoBinding {
     setCertificateCompression(algorithms: number): void;
     close(): void;
     loadPKCS12(pfx: ByteSource, passphrase?: ByteSource): void;
-    setClientCertEngine(clientCertEngine: string): void;
     getTicketKeys(): Buffer;
     setTicketKeys(keys: ByteSource): void;
     enableTicketKeyCallback(): void;
     getCertificate(): Buffer | null;
     getIssuer(): Buffer | null;
+  }
+
+  interface X509NameAttribute {
+    oid: string;
+    value?: string;
+  }
+
+  interface X509Name {
+    raw: Buffer;
+    rdns: X509NameAttribute[][];
+  }
+
+  interface X509RawExtension {
+    oid: string;
+    critical: boolean;
+    value: Buffer;
+  }
+
+  interface X509AlgorithmIdentifier {
+    oid: string;
+    parameters?: Buffer;
+  }
+
+  interface X509Signature {
+    algorithm: X509AlgorithmIdentifier;
+    value: Buffer;
   }
 
   interface X509CertificateHandle {
@@ -742,6 +767,12 @@ declare namespace InternalCryptoBinding {
     serialNumber(): string;
     signatureAlgorithm(): string | undefined;
     signatureAlgorithmOid(): string | undefined;
+    version(): number | undefined;
+    subjectName(): X509Name | undefined;
+    issuerName(): X509Name | undefined;
+    extensions(): X509RawExtension[] | undefined;
+    tbs(): Buffer | undefined;
+    signature(): X509Signature | undefined;
     raw(): Buffer;
     publicKey(): KeyObjectHandle;
     pem(): string;
@@ -973,6 +1004,9 @@ export interface CryptoBinding {
   getFipsCryptoGeneration(): bigint;
   getHashes(): string[];
   getMacs(): string[];
+  getX509CertificateSnapshot(
+    certificate: InternalCryptoBinding.X509CertificateHandle,
+  ): InternalCryptoBinding.Buffer[];
   isCryptoKey(key: unknown): boolean;
   isKeyAlgorithmAvailable(name: string): boolean;
   isKeyObject(key: unknown): boolean;
@@ -998,6 +1032,9 @@ export interface CryptoBinding {
     passphrase?: InternalCryptoBinding.ByteSource,
   ): InternalCryptoBinding.PKCS12ParseResult;
   parseX509(data: InternalCryptoBinding.ByteSource): InternalCryptoBinding.X509CertificateHandle;
+  parseX509Snapshot(
+    snapshot: ArrayBufferView[],
+  ): InternalCryptoBinding.X509CertificateHandle;
   privateDecrypt: InternalCryptoBinding.PublicKeyCipher;
   privateEncrypt: InternalCryptoBinding.PublicKeyCipher;
   publicDecrypt: InternalCryptoBinding.PublicKeyCipher;
@@ -1006,7 +1043,6 @@ export interface CryptoBinding {
   resetRootCertStore(): void;
   secureBuffer(length: number): Uint8Array | undefined;
   secureHeapUsed(): bigint | undefined;
-  setEngine?(engine: string, flags: number): void;
   setupFipsIndicatorChannel(): void;
   setFipsCrypto(fips: boolean | number): void;
   startLoadingCertificatesOffThread(): void;

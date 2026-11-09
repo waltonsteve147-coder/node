@@ -112,6 +112,14 @@ class DebugOptions : public Options {
     return break_first_line || break_node_first_line;
   }
 
+  const char* inspector_option_name() const {
+    if (break_node_first_line) return "--inspect-brk-node";
+    if (break_first_line) return "--inspect-brk";
+    if (inspect_wait) return "--inspect-wait";
+    if (inspector_enabled) return "--inspect";
+    return nullptr;
+  }
+
   void CheckOptions(std::vector<std::string>* errors,
                     std::vector<std::string>* argv) override;
 };
@@ -445,7 +453,7 @@ class PerProcessOptions : public Options {
   DEFINE_BOOL_FIELD(force_fips_crypto) = false;
   std::string force_fips_crypto_policy = "provider";
 #endif  // HAVE_OPENSSL
-#if OPENSSL_VERSION_MAJOR >= 3
+#if HAVE_OPENSSL && !defined(OPENSSL_IS_BORINGSSL)
   DEFINE_BOOL_FIELD(openssl_legacy_provider) = false;
   DEFINE_BOOL_FIELD(openssl_shared_config) = false;
 #endif

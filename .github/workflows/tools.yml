@@ -346,13 +346,13 @@ jobs:
           persist-credentials: false
       - name: Set up Python ${{ env.PYTHON_VERSION }}
         if: matrix.requires-python && (github.event_name == 'schedule' || inputs.id == 'all' || inputs.id == matrix.id) && steps.check-pr.outputs.hasNonBotCommits != 'true'
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           allow-prereleases: true
       - name: Set up Nix
         if: matrix.id == 'nixpkgs-unstable' && (github.event_name == 'schedule' || inputs.id == 'all' || inputs.id == matrix.id) && steps.check-pr.outputs.hasNonBotCommits != 'true'
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24  # v31.11.1
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b  # v31.11.3
       - run: ${{ matrix.run }}
         if: (github.event_name == 'schedule' || inputs.id == 'all' || inputs.id == matrix.id) && steps.check-pr.outputs.hasNonBotCommits != 'true'
         env:
